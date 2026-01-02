@@ -1,0 +1,313 @@
+h1. Elasticsearch Observability Migration
+h2. Snapshot & Restore Method (Self-Managed, 8.17.3)
+
+h3. Document Purpose
+This document describes the *standard and recommended procedure* to migrate *all Elasticsearch observability data* from one *self-managed Elasticsearch 8.17.3 cluster* to another using the *Snapshot & Restore* method.
+
+The migration covers:
+
+* All observability data (logs, metrics, traces, uptime)
+* All indices, data streams, and standalone indices
+* Cluster metadata (index templates, component templates, ILM policies, ingest pipelines, stored scripts)
+* Kibana saved objects (dashboards, visualizations, index patterns)
+* Security configuration (roles, users, API keys)
+
+This document is intended for *platform, SRE, and observability engineers* performing large-scale cluster migrations.
+
+---
+
+h2. Scope & Assumptions
+
+h3. Environment
+
+* *Source cluster version:* Elasticsearch 8.17.3
+* *Target cluster version:* Elasticsearch 8.17.3
+* *Deployment type:* Self-managed
+* *Data volume:* ~19.6 TB
+* *Index count:* ~5,881 indices
+* *Downtime tolerance:* 12–15 hours
+
+h3. Key Assumptions
+
+* Both clusters can access a *shared snapshot repository*
+* Target cluster capacity is *equal to or greater* than the source cluster
+* No cross-major version upgrade is involved
+* All indices to be migrated are *open* (closed indices are not included in snapshots)
+
+---
+
+h2. Why Snapshot & Restore
+
+Snapshot & Restore is the *recommended migration approach* because it:
+
+* Is the *native and officially supported* Elasticsearch backup mechanism
+* Preserves *index mappings, settings, aliases, templates, ILM policies, and ingest pipelines*
+* Supports *system indices* (Kibana, Security) via *feature states*
+* Is significantly *faster and safer* than reindexing for multi-terabyte datasets
+* Requires *minimal manual reconfiguration*
+
+---
+
+h2. High-Level Migration Flow
+
+# Prepare source and target clusters
+
+# Configure and validate snapshot repository
+
+# Take full snapshot on source cluster
+
+# Restore snapshot on target cluster
+
+# Restore system feature states (Kibana & Security)
+
+# Validate data and configuration
+
+# Cut over traffic to new cluster
+
+---
+
+h2. Pre-Migration Checklist
+
+h3. Source Cluster
+
+* Cluster health is *green*
+* No unassigned shards
+* All required indices are *open*
+* No snapshot failures in recent history
+
+h3. Target Cluster
+
+* Cluster version matches source (8.17.3)
+* Sufficient disk capacity (+20–30% headroom)
+* Snapshot repository registered (read-only)
+* Security and TLS configuration completed
+
+h3. Snapshot Repository
+
+* Shared storage (e.g., NFS, S3, GCS, Azure Blob)
+* Accessible from *both clusters*
+* Tested with a small snapshot
+
+---
+
+h2. Step 1: Snapshot Repository Configuration
+
+{info}
+If the repository already exists and is in use, verify configuration and skip creation.
+{info}
+
+h3. Register Repository (Source Cluster)
+
+{code:language=http}
+PUT /_snapshot/observability_repo
+{
+"type": "fs",
+"settings": {
+"location": "/mnt/es_snapshots",
+"compress": true
+}
+}
+{code}
+
+h3. Verify Repository
+
+{code:language=http}
+GET /_snapshot/observability_repo
+{code}
+
+Ensure repository state is *SUCCESS*.
+
+---
+
+h2. Step 2: Create Full Snapshot (Source Cluster)
+
+h3. Snapshot Contents
+This snapshot includes:
+
+* All open indices and data streams
+* Cluster state:
+  ** Index templates
+  ** Component templates
+  ** ILM policies
+  ** Ingest pipelines
+  ** Persistent cluster settings
+
+h3. Create Snapshot
+
+{code:language=http}
+PUT /_snapshot/observability_repo/obs-full-snapshot?wait_for_completion=true
+{code}
+
+{note}
+Closed indices are NOT included. Open them before snapshot if required.
+{note}
+
+h3. Verify Snapshot Status
+
+{code:language=http}
+GET /_snapshot/observability_repo/obs-full-snapshot/_status
+{code}
+
+---
+
+h2. Step 3: Snapshot System Feature States
+
+System indices (e.g., .kibana, .security) are not included by default and must be backed up using *feature states*.
+
+h3. Create Feature State Snapshot
+
+{code:language=http}
+PUT /_snapshot/observability_repo/obs-system-snapshot?wait_for_completion=true
+{
+"feature_states": ["kibana", "security"],
+"include_global_state": true
+}
+{code}
+
+This snapshot contains:
+
+* Kibana saved objects
+* Users, roles, role mappings
+* API keys
+
+---
+
+h2. Step 4: Register Repository on Target Cluster
+
+h3. Register Repository (Read-Only)
+
+{code:language=http}
+PUT /_snapshot/observability_repo
+{
+"type": "fs",
+"settings": {
+"location": "/mnt/es_snapshots",
+"readonly": true
+}
+}
+{code}
+
+h3. Verify Snapshot Visibility
+
+{code:language=http}
+GET /_snapshot/observability_repo/_all
+{code}
+
+---
+
+h2. Step 5: Restore Data Snapshot (Target Cluster)
+
+h3. Restore All Data and Cluster State
+
+{code:language=http}
+POST /_snapshot/observability_repo/obs-full-snapshot/_restore
+{
+"include_global_state": true,
+"include_aliases": true
+}
+{code}
+
+h3. Monitor Restore Progress
+
+{code:language=http}
+GET /_recovery
+GET /_cluster/health
+{code}
+
+---
+
+h2. Step 6: Restore System Feature States
+
+{code:language=http}
+POST /_snapshot/observability_repo/obs-system-snapshot/_restore
+{
+"indices": "-*",
+"include_global_state": false,
+"feature_states": ["kibana", "security"]
+}
+{code}
+
+---
+
+h2. Step 7: Performance Tuning (Recommended)
+
+Apply temporary settings during restore:
+
+{code:language=yaml}
+cluster.routing.allocation.node_concurrent_recoveries: 8
+cluster.routing.allocation.node_initial_primaries_recoveries: 8
+indices.recovery.max_bytes_per_sec: 1000mb
+{code}
+
+Revert to defaults after restore completion.
+
+---
+
+h2. Step 8: Post-Migration Validation
+
+h3. Data Validation
+
+* Compare index counts
+  {code:language=http}
+  GET /_cat/indices?v
+  {code}
+* Validate document counts for critical indices
+* Sample queries on logs, metrics, traces
+
+h3. Kibana Validation
+
+* Dashboards load successfully
+* Index patterns resolve correctly
+* Visualizations display data
+
+h3. Configuration Validation
+
+* Index templates present
+* ILM policies attached and running
+* Ingest pipelines functional
+
+h3. Security Validation
+
+* Users and roles exist
+* API keys work
+* Authentication and authorization verified
+
+---
+
+h2. Step 9: Cutover Procedure
+
+# Stop ingestion to source cluster
+
+# Redirect Beats / Agents / Applications to target cluster
+
+# Monitor ingestion and dashboards
+
+# Keep source cluster read-only until confidence is established
+
+---
+
+h2. Rollback Strategy
+
+* Do *not delete* source cluster immediately
+* Retain snapshots for rollback
+* If issues occur:
+  ** Revert clients to source cluster
+  ** Investigate and re-restore affected indices
+
+---
+
+h2. Common Pitfalls & Notes
+
+* Closed indices are *not included* in snapshots
+* TLS certificates and node-level configuration are *not migrated*
+* Snapshot restore overwrites existing indices with the same name
+* Repository must be *identical and accessible* on both clusters
+
+---
+
+h2. Conclusion
+
+Snapshot & Restore is the *recommended, safe, and scalable* approach for migrating large Elasticsearch observability clusters.
+This procedure ensures *full-fidelity migration* of data, configuration, and Kibana content with minimal operational risk.
+
+---
