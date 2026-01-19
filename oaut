@@ -1,0 +1,65 @@
+step('Fetch OAuth Bearer Token', async () => {
+  // Configuration - replace with your actual values or use params
+  const oauthUrl = 'https://your-auth-server.com/oauth/token';
+  const clientId = 'your-client-id';
+  const clientSecret = 'your-client-secret';
+  const scope = 'read write';
+
+  // Prepare OAuth request body
+  const tokenRequestBody = {
+    grant_type: 'client_credentials',
+    client_id: clientId,
+    client_secret: clientSecret,
+    scope: scope
+  };
+
+  // Make OAuth token request
+  const tokenResponse = await page.request.post(oauthUrl, {
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    form: tokenRequestBody
+  });
+
+  // Verify token request was successful
+  expect(tokenResponse.ok()).toBeTruthy();
+  expect(tokenResponse.status()).toBe(200);
+
+  // Parse token response
+  const tokenData = await tokenResponse.json();
+  const bearerToken = tokenData.access_token;
+
+  // Validate token exists
+  expect(bearerToken).toBeTruthy();
+  console.log('Bearer token obtained successfully');
+
+  // Store token for next step
+  return bearerToken;
+});
+
+step('Call API with Bearer Token', async () => {
+  // Get token from previous step
+  const bearerToken = await step('Fetch OAuth Bearer Token');
+  
+  // API endpoint
+  const apiUrl = 'https://api.example.com/endpoint';
+
+  // Make authenticated API request
+  const apiResponse = await page.request.get(apiUrl, {
+    headers: {
+      'Authorization': `Bearer ${bearerToken}`,
+      'Content-Type': 'application/json'
+    }
+  });
+
+  // Verify API request was successful
+  expect(apiResponse.ok()).toBeTruthy();
+  expect(apiResponse.status()).toBe(200);
+
+  // Parse and log response
+  const apiData = await apiResponse.json();
+  console.log('API Response:', JSON.stringify(apiData, null, 2));
+
+  // Add custom assertions based on your API response
+  expect(apiData).toBeTruthy();
+});
