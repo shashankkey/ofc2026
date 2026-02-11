@@ -239,3 +239,22 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def create_fingerprint_pipeline(es):
+    """Create an ingest pipeline that generates unique fingerprints"""
+    pipeline = {
+        "description": "Generate fingerprint for deduplication",
+        "processors": [
+            {
+                "fingerprint": {
+                    "fields": ["@timestamp", "scope_name", "metric_name", "attributes"],
+                    "target_field": "_id",
+                    "method": "MD5"
+                }
+            }
+        ]
+    }
+    
+    es.ingest.put_pipeline(id="rum-dedup-pipeline", body=pipeline)
+    print("✓ Created fingerprint pipeline")
