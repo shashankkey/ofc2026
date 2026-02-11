@@ -1,0 +1,241 @@
+import requests
+from elasticsearch import Elasticsearch, helpers
+from datetime import datetime
+import json
+
+# SAP Cloud ALM Configuration
+CALM_BASE_URL = "https://us10.alm.cloud.sap"  # Your region
+CALM_API_ENDPOINT = f"{CALM_BASE_URL}/api/calm-analytics/v1/rest/dataset"
+TOKEN_URL = "https://authentication.us10.hana.ondemand.com/oauth/token"
+CLIENT_ID = "your_client_id"
+CLIENT_SECRET = "your_client_secret"
+
+# Elasticsearch Configuration
+ES_HOST = "http://localhost:9200"
+ES_INDEX = "sap-calm-rum-metrics"
+ES_USER = "elastic"  # if authentication is enabled
+ES_PASSWORD = "your_password"  # if authentication is enabled
+
+def get_oauth_token():
+    """Get OAuth token from SAP Cloud ALM"""
+    response = requests.post(
+        TOKEN_URL,
+        auth=(CLIENT_ID, CLIENT_SECRET),
+        data={"grant_type": "client_credentials"}
+    )
+    
+    if response.status_code == 200:
+        return response.json()["access_token"]
+    else:
+        raise Exception(f"Failed to get token: {response.text}")
+
+def fetch_rum_data(token):
+    """Fetch RUM data from SAP Cloud ALM Analytics API"""
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    
+    # Your API request payload
+    payload = {
+        "format": "time_series",
+        "timestampFormat": "unix",
+        "timeRange": {
+            "semantic": "C10Mi"  # Current 10 minutes (as shown in your screenshot)
+        },
+        "resolution": "R",  # Raw data
+        "queries": [
+            {
+                "name": "RUM_Metrics",
+                "provider": "DP_RUM",
+                "columns": {
+                    "dimensions": ["serviceName", "serviceId"],  # Based on your screenshot
+                    "metrics": []
+                }
+            }
+        ]
+    }
+    
+    response = requests.post(CALM_API_ENDPOINT, headers=headers, json=payload)
+    
+    if response.status_code == 200:
+        return response.json()
+    else:
+        raise Exception(f"API Error {response.status_code}: {response.text}")
+
+def parse_otel_metrics(data):
+    """Parse OpenTelemetry format metrics from SAP Cloud ALM"""
+    parsed_records = []
+    
+    # Navigate through the OpenTelemetry structure
+    if "resourceMetrics" in data:
+        for resource_metric in data["resourceMetrics"]:
+            # Extract resource attributes
+            resource_attrs = {}
+            if "resource" in resource_metric and "attributes" in resource_metric["resource"]:
+                for attr in resource_metric["resource"]["attributes"]:
+                    resource_attrs[attr["key"]] = attr["value"]
+            
+            # Process scope metrics
+            for scope_metric in resource_metric.get("scopeMetrics", []):
+                scope_name = scope_metric.get("scope", {}).get("name", "unknown")
+                scope_version = scope_metric.get("scope", {}).get("version", "unknown")
+                
+                # Process each metric
+                for metric in scope_metric.get("metrics", []):
+                    metric_name = metric.get("name", "unknown")
+                    metric_description = metric.get("description", "")
+                    metric_unit = metric.get("unit", "")
+                    
+                    # Handle different metric types (gauge, sum, histogram, etc.)
+                    data_points = []
+                    
+                    # Gauge metrics
+                    if "gauge" in metric:
+                        data_points = metric["gauge"].get("dataPoints", [])
+                    # Sum metrics
+                    elif "sum" in metric:
+                        data_points = metric["sum"].get("dataPoints", [])
+                    # Histogram metrics
+                    elif "histogram" in metric:
+                        data_points = metric["histogram"].get("dataPoints", [])
+                    
+                    # Process each data point
+                    for dp in data_points:
+                        # Extract attributes (dimensions)
+                        attributes = {}
+                        for attr in dp.get("attributes", []):
+                            attributes[attr["key"]] = attr.get("value", {}).get("stringValue", 
+                                                      attr.get("value", {}).get("intValue",
+                                                      attr.get("value", {}).get("doubleValue", "")))
+                        
+                        # Extract timestamp
+                        timestamp_nano = dp.get("timeUnixNano", 0)
+                        timestamp = datetime.fromtimestamp(timestamp_nano / 1_000_000_000)
+                        
+                        # Extract value
+                        value = None
+                        if "asDouble" in dp:
+                            value = dp["asDouble"]
+                        elif "asInt" in dp:
+                            value = dp["asInt"]
+                        
+                        # Create record for Elasticsearch
+                        record = {
+                            "@timestamp": timestamp.isoformat(),
+                            "scope_name": scope_name,
+                            "scope_version": scope_version,
+                            "metric_name": metric_name,
+                            "metric_description": metric_description,
+                            "metric_unit": metric_unit,
+                            "value": value,
+                            "attributes": attributes,
+                            "resource": resource_attrs
+                        }
+                        
+                        # Flatten attributes for easier querying
+                        for key, val in attributes.items():
+                            record[f"attr_{key}"] = val
+                        
+                        parsed_records.append(record)
+    
+    return parsed_records
+
+def create_es_index_template(es):
+    """Create Elasticsearch index template with proper mappings"""
+    template = {
+        "index_patterns": ["sap-calm-rum-*"],
+        "template": {
+            "settings": {
+                "number_of_shards": 1,
+                "number_of_replicas": 1
+            },
+            "mappings": {
+                "properties": {
+                    "@timestamp": {"type": "date"},
+                    "scope_name": {"type": "keyword"},
+                    "scope_version": {"type": "keyword"},
+                    "metric_name": {"type": "keyword"},
+                    "metric_description": {"type": "text"},
+                    "metric_unit": {"type": "keyword"},
+                    "value": {"type": "double"},
+                    "attributes": {"type": "object", "enabled": False},
+                    "resource": {"type": "object", "enabled": False},
+                    "attr_serviceName": {"type": "keyword"},
+                    "attr_serviceId": {"type": "keyword"},
+                    "attr_requestType": {"type": "keyword"}
+                }
+            }
+        }
+    }
+    
+    es.indices.put_index_template(name="sap-calm-rum-template", body=template)
+    print("✓ Elasticsearch index template created")
+
+def bulk_index_to_elasticsearch(es, records, index_name):
+    """Bulk index records to Elasticsearch"""
+    actions = [
+        {
+            "_index": index_name,
+            "_source": record
+        }
+        for record in records
+    ]
+    
+    if actions:
+        success, failed = helpers.bulk(es, actions, raise_on_error=False)
+        print(f"✓ Indexed {success} documents to Elasticsearch")
+        if failed:
+            print(f"✗ Failed to index {len(failed)} documents")
+        return success
+    else:
+        print("No records to index")
+        return 0
+
+def main():
+    """Main execution flow"""
+    print("Starting SAP Cloud ALM to Elasticsearch ingestion...")
+    
+    # Step 1: Connect to Elasticsearch
+    es = Elasticsearch(
+        [ES_HOST],
+        basic_auth=(ES_USER, ES_PASSWORD) if ES_USER else None
+    )
+    
+    if not es.ping():
+        raise Exception("Could not connect to Elasticsearch")
+    print("✓ Connected to Elasticsearch")
+    
+    # Step 2: Create index template
+    create_es_index_template(es)
+    
+    # Step 3: Get OAuth token
+    print("Getting OAuth token...")
+    token = get_oauth_token()
+    print("✓ OAuth token obtained")
+    
+    # Step 4: Fetch RUM data
+    print("Fetching RUM data from SAP Cloud ALM...")
+    rum_data = fetch_rum_data(token)
+    print(f"✓ Received response with {len(str(rum_data))} bytes")
+    
+    # Step 5: Parse the data
+    print("Parsing OpenTelemetry metrics...")
+    parsed_records = parse_otel_metrics(rum_data)
+    print(f"✓ Parsed {len(parsed_records)} metric records")
+    
+    # Step 6: Index to Elasticsearch
+    if parsed_records:
+        print("Indexing to Elasticsearch...")
+        indexed_count = bulk_index_to_elasticsearch(es, parsed_records, ES_INDEX)
+        print(f"\n✓ Successfully indexed {indexed_count} documents!")
+        
+        # Print sample record
+        if parsed_records:
+            print("\nSample record:")
+            print(json.dumps(parsed_records[0], indent=2, default=str))
+    else:
+        print("No records to index")
+
+if __name__ == "__main__":
+    main()
