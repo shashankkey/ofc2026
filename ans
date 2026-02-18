@@ -30,6 +30,22 @@ foreach ($machine in $machines) {
     Write-Host "`nConnecting to $hostname ..." -ForegroundColor Cyan
 
     try {
+        # First check if it's a Windows machine via WinRM response
+        $osCheck = Invoke-Command -ComputerName $hostname -Credential $Credential -Authentication Negotiate -SessionOption $sessionOption -ErrorAction Stop -ScriptBlock {
+            $env:OS  # Returns "Windows_NT" on Windows, empty/null on Linux
+        }
+
+        if ($osCheck -ne "Windows_NT") {
+            Write-Host "  Skipping — not a Windows machine" -ForegroundColor Yellow
+            $results += [PSCustomObject]@{
+                Hostname    = $hostname
+                ClusterName = "N/A"
+                LogPath     = "N/A"
+                Version     = "N/A"
+                Status      = "Not a Windows machine"
+            }
+            continue
+        }
         $result = Invoke-Command -ComputerName $hostname -Credential $Credential -Authentication Negotiate -SessionOption $sessionOption -ErrorAction Stop -ScriptBlock {
 
             # 1. Get Windows Failover Cluster Name
