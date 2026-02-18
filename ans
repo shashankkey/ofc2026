@@ -1,0 +1,52 @@
+# Load the CSV
+$machines = Import-Csv -Path "C:\machines.csv"
+
+# Results array
+$results = @()
+
+foreach ($machine in $machines) {
+    $hostname = $machine.Hostname  # adjust column name to match your CSV
+
+    Write-Host "Connecting to $hostname..." -ForegroundColor Cyan
+
+    try {
+        $result = Invoke-Command -ComputerName $hostname -ErrorAction Stop -ScriptBlock {
+            
+            # ---- YOUR SCRIPT LOGIC HERE ----
+            # Example: adapt these to your actual commands
+
+            $clusterName = (Get-ItemProperty "HKLM:\SOFTWARE\MyApp\Config" -Name "ClusterName" -ErrorAction SilentlyContinue).ClusterName
+            $logPath     = (Get-ItemProperty "HKLM:\SOFTWARE\MyApp\Config" -Name "LogPath"     -ErrorAction SilentlyContinue).LogPath
+            $version     = (Get-ItemProperty "HKLM:\SOFTWARE\MyApp\Config" -Name "Version"     -ErrorAction SilentlyContinue).Version
+
+            # Return as object
+            [PSCustomObject]@{
+                ClusterName = $clusterName
+                LogPath     = $logPath
+                Version     = $version
+            }
+        }
+
+        $results += [PSCustomObject]@{
+            Hostname    = $hostname
+            ClusterName = $result.ClusterName
+            LogPath     = $result.LogPath
+            Version     = $result.Version
+            Status      = "OK"
+        }
+
+    } catch {
+        Write-Host "  Failed: $_" -ForegroundColor Red
+        $results += [PSCustomObject]@{
+            Hostname    = $hostname
+            ClusterName = "N/A"
+            LogPath     = "N/A"
+            Version     = "N/A"
+            Status      = "ERROR: $_"
+        }
+    }
+}
+
+# Export results back to CSV
+$results | Export-Csv -Path "C:\machines_results.csv" -NoTypeInformation
+Write-Host "Done! Results saved to C:\machines_results.csv" -ForegroundColor Green
