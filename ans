@@ -18,6 +18,9 @@ $Credential = New-Object System.Management.Automation.PSCredential($credUser, $c
 # --- Load the CSV ---
 $machines = Import-Csv -Path $InputCsv
 
+# --- Session options (no admin rights needed, skips certificate trust checks) ---
+$sessionOption = New-PSSessionOption -SkipCACheck -SkipCNCheck -SkipRevocationCheck
+
 # --- Results array ---
 $results = @()
 
@@ -27,11 +30,12 @@ foreach ($machine in $machines) {
     Write-Host "`nConnecting to $hostname ..." -ForegroundColor Cyan
 
     try {
-        $result = Invoke-Command -ComputerName $hostname -Credential $Credential -ErrorAction Stop -ScriptBlock {
+        $result = Invoke-Command -ComputerName $hostname -Credential $Credential -Authentication Negotiate -SessionOption $sessionOption -ErrorAction Stop -ScriptBlock {
 
             # 1. Get Windows Failover Cluster Name
             $clusterName = $null
             try {
+                Import-Module FailoverClusters -ErrorAction Stop
                 $clusterName = (Get-Cluster -ErrorAction Stop).Name
             } catch {
                 $clusterName = "N/A (Not a cluster node or RSAT missing)"
@@ -102,20 +106,3 @@ foreach ($machine in $machines) {
 # --- Export results to CSV ---
 $results | Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8
 Write-Host "`nDone! Results saved to $OutputCsv" -ForegroundColor Green
-
-
-
-$sessionOption = New-PSSessionOption -SkipCACheck -SkipCNCheck -SkipRevocationCheck
-
-$cred = New-Object System.Management.Automation.PSCredential(
-    "DOMAIN\username",
-    (Read-Host "Password" -AsSecureString)
-)
-
-Invoke-Command -ComputerName SERVER01 -Credential $cred `
-    -Authentication Negotiate `
-    -SessionOption $sessionOption `
-    -ScriptBlock {
-        Import-Module FailoverClusters
-        (Get-Cluster).Name
-    }
