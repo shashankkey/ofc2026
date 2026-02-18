@@ -11,7 +11,9 @@ $OutputCsv = ".\machines_results.csv"  # Output CSV path
 $HostnameColumn = "Hostname"           # Column name in your CSV that holds machine names
 
 # --- Prompt for credentials once (used for all machines) ---
-$Credential = Get-Credential -Message "Enter credentials for remote machines"
+$credUser = Read-Host "Enter username (e.g. DOMAIN\username)"
+$credPass = Read-Host "Enter password" -AsSecureString
+$Credential = New-Object System.Management.Automation.PSCredential($credUser, $credPass)
 
 # --- Load the CSV ---
 $machines = Import-Csv -Path $InputCsv
