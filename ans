@@ -35,10 +35,21 @@ foreach ($machine in $machines) {
             # 1. Get Windows Failover Cluster Name
             $clusterName = $null
             try {
+                # Try loading FailoverClusters module (requires RSAT on remote machine)
                 Import-Module FailoverClusters -ErrorAction Stop
                 $clusterName = (Get-Cluster -ErrorAction Stop).Name
             } catch {
-                $clusterName = "N/A (Not a cluster node or RSAT missing)"
+                # Fallback 1: Read cluster name from registry (works without RSAT)
+                try {
+                    $clusterName = (Get-ItemProperty -Path "HKLM:\Cluster" -Name "ClusterName" -ErrorAction Stop).ClusterName
+                } catch {
+                    # Fallback 2: Read from environment/WMI
+                    try {
+                        $clusterName = (Get-WmiObject -Namespace root\MSCluster -Class MSCluster_Cluster -ErrorAction Stop).Name
+                    } catch {
+                        $clusterName = "N/A (FailoverClusters module not installed)"
+                    }
+                }
             }
 
             # 2. Get SQL Server Error Log Path using the cluster name as the instance
