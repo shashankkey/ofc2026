@@ -1,25 +1,74 @@
-# Load the CSV
-$machines = Import-Csv -Path "C:\machines.csv"
+# ============================================================
+# ans.ps1 - Remote Windows Cluster Info Collector
+# Reads hostnames from a CSV, connects to each via WinRM,
+# collects cluster name, SQL log path, and SQL version,
+# then saves results back to a CSV.
+# ============================================================
 
-# Results array
+# --- Configuration ---
+$InputCsv  = ".\machines.csv"          # Input CSV (must have a "Hostname" column)
+$OutputCsv = ".\machines_results.csv"  # Output CSV path
+$HostnameColumn = "Hostname"           # Column name in your CSV that holds machine names
+
+# --- Prompt for credentials once (used for all machines) ---
+$Credential = Get-Credential -Message "Enter credentials for remote machines"
+
+# --- Load the CSV ---
+$machines = Import-Csv -Path $InputCsv
+
+# --- Results array ---
 $results = @()
 
 foreach ($machine in $machines) {
-    $hostname = $machine.Hostname  # adjust column name to match your CSV
+    $hostname = $machine.$HostnameColumn
 
-    Write-Host "Connecting to $hostname..." -ForegroundColor Cyan
+    Write-Host "`nConnecting to $hostname ..." -ForegroundColor Cyan
 
     try {
-        $result = Invoke-Command -ComputerName $hostname -ErrorAction Stop -ScriptBlock {
-            
-            # ---- YOUR SCRIPT LOGIC HERE ----
-            # Example: adapt these to your actual commands
+        $result = Invoke-Command -ComputerName $hostname -Credential $Credential -ErrorAction Stop -ScriptBlock {
 
-            $clusterName = (Get-ItemProperty "HKLM:\SOFTWARE\MyApp\Config" -Name "ClusterName" -ErrorAction SilentlyContinue).ClusterName
-            $logPath     = (Get-ItemProperty "HKLM:\SOFTWARE\MyApp\Config" -Name "LogPath"     -ErrorAction SilentlyContinue).LogPath
-            $version     = (Get-ItemProperty "HKLM:\SOFTWARE\MyApp\Config" -Name "Version"     -ErrorAction SilentlyContinue).Version
+            # 1. Get Windows Failover Cluster Name
+            $clusterName = $null
+            try {
+                $clusterName = (Get-Cluster -ErrorAction Stop).Name
+            } catch {
+                $clusterName = "N/A (Not a cluster node or RSAT missing)"
+            }
 
-            # Return as object
+            # 2. Get SQL Server Error Log Path using the cluster name as the instance
+            #    Falls back to local machine name if cluster name not found
+            $sqlInstance = if ($clusterName -and $clusterName -notlike "N/A*") { $clusterName } else { $env:COMPUTERNAME }
+            $logPath = $null
+            try {
+                $logRow = Invoke-Sqlcmd -ServerInstance $sqlInstance `
+                                        -Database master `
+                                        -Query "EXEC xp_readerrorlog 0,1,N'Logging SQL Server messages in file';" `
+                                        -ErrorAction Stop |
+                          Where-Object { $_.Text -like "*Logging*" } |
+                          Select-Object -First 1
+                $logPath = if ($logRow) { $logRow.Text } else { "N/A" }
+            } catch {
+                $logPath = "ERROR: $_"
+            }
+
+            # 3. Get SQL Server Version
+            $version = $null
+            try {
+                $versionRow = Invoke-Sqlcmd -ServerInstance $sqlInstance `
+                                            -Database master `
+                                            -Query "SELECT @@VERSION AS Version;" `
+                                            -ErrorAction Stop
+                $version = if ($versionRow) { $versionRow.Version } else { "N/A" }
+            } catch {
+                # Fallback: try sqlcmd.exe CLI
+                try {
+                    $version = (sqlcmd -S $sqlInstance -d master -E -Q "SELECT @@VERSION" 2>&1) -join " "
+                } catch {
+                    $version = "ERROR: $_"
+                }
+            }
+
+            # Return collected info
             [PSCustomObject]@{
                 ClusterName = $clusterName
                 LogPath     = $logPath
@@ -27,6 +76,7 @@ foreach ($machine in $machines) {
             }
         }
 
+        Write-Host "  OK" -ForegroundColor Green
         $results += [PSCustomObject]@{
             Hostname    = $hostname
             ClusterName = $result.ClusterName
@@ -36,17 +86,17 @@ foreach ($machine in $machines) {
         }
 
     } catch {
-        Write-Host "  Failed: $_" -ForegroundColor Red
+        Write-Host "  FAILED: $_" -ForegroundColor Red
         $results += [PSCustomObject]@{
             Hostname    = $hostname
             ClusterName = "N/A"
             LogPath     = "N/A"
             Version     = "N/A"
-            Status      = "ERROR: $_"
+            Status      = "ERROR: $($_.Exception.Message)"
         }
     }
 }
 
-# Export results back to CSV
-$results | Export-Csv -Path "C:\machines_results.csv" -NoTypeInformation
-Write-Host "Done! Results saved to C:\machines_results.csv" -ForegroundColor Green
+# --- Export results to CSV ---
+$results | Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8
+Write-Host "`nDone! Results saved to $OutputCsv" -ForegroundColor Green
