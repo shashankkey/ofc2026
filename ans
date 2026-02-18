@@ -102,3 +102,13 @@ foreach ($machine in $machines) {
 # --- Export results to CSV ---
 $results | Export-Csv -Path $OutputCsv -NoTypeInformation -Encoding UTF8
 Write-Host "`nDone! Results saved to $OutputCsv" -ForegroundColor Green
+
+
+
+$cred = New-Object System.Management.Automation.PSCredential(
+    "DOMAIN\username",
+    (Read-Host "Password" -AsSecureString)
+)
+Invoke-Command -ComputerName SERVER01 -Credential $cred -ScriptBlock {
+    (Get-Cluster).Name
+}
