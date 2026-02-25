@@ -32,7 +32,6 @@ Usage:
 import os
 import sys
 import json
-import time
 import logging
 import argparse
 from datetime import datetime, timezone
@@ -293,7 +292,6 @@ def main():
     parser = argparse.ArgumentParser(
         description="Ingest Salesforce Status incidents & maintenances into Elasticsearch"
     )
-    parser.add_argument("--once",    action="store_true", help="Single run then exit")
     parser.add_argument("--dry-run", action="store_true", help="Fetch & print only, no ES writes")
     args = parser.parse_args()
 
@@ -304,18 +302,7 @@ def main():
         es = ElasticIngestor()
         es.ensure_indices()
 
-    if args.once or args.dry_run:
-        run_once(sf, es, dry_run=args.dry_run)
-    else:
-        log.info("Polling every %ds. Ctrl+C to stop.", POLL_INTERVAL)
-        while True:
-            try:
-                run_once(sf, es)
-            except requests.exceptions.RequestException as e:
-                log.error("API error (will retry): %s", e)
-            except Exception as e:
-                log.error("Error (will retry): %s", e, exc_info=True)
-            time.sleep(POLL_INTERVAL)
+    run_once(sf, es, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
