@@ -1,0 +1,303 @@
+"""
+Salesforce Status → Elasticsearch Ingestion Script
+
+Pulls active incidents and maintenances from the Salesforce Trust Status API
+for a given domain alias and ingests them into Elasticsearch for alerting.
+
+Usage:
+    python sf_status_ingest.py             # Continuous polling
+    python sf_status_ingest.py --once      # Single run, then exit
+    python sf_status_ingest.py --dry-run   # Fetch and print, no ES writes
+"""
+
+import os
+import sys
+import json
+import time
+import logging
+import argparse
+from datetime import datetime, timezone
+
+import requests
+import urllib3
+from dotenv import load_dotenv
+from elasticsearch import Elasticsearch
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S%z",
+)
+log = logging.getLogger("sf_status_ingest")
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+load_dotenv()
+
+SF_BASE_URL      = os.getenv("SF_STATUS_BASE_URL", "https://api.status.salesforce.com/v1")
+SF_DOMAIN_ALIAS  = os.getenv("SF_DOMAIN_ALIAS", "effectv")
+
+ES_HOST          = os.getenv("ES_HOST", "https://localhost:9200")
+ES_USER          = os.getenv("ES_USER", "elastic")
+ES_PASSWORD      = os.getenv("ES_PASSWORD", "changeme")
+ES_VERIFY_SSL    = os.getenv("ES_VERIFY_SSL", "false").lower() == "true"
+
+INCIDENT_INDEX   = os.getenv("ES_INCIDENT_INDEX", "salesforce-incidents")
+MAINTENANCE_INDEX = os.getenv("ES_MAINTENANCE_INDEX", "salesforce-maintenances")
+
+POLL_INTERVAL    = int(os.getenv("POLL_INTERVAL", "300"))
+
+
+# ---------------------------------------------------------------------------
+# Index Mappings
+# ---------------------------------------------------------------------------
+INCIDENT_MAPPING = {
+    "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+    "mappings": {
+        "properties": {
+            "@timestamp":            {"type": "date"},
+            "domain_alias":          {"type": "keyword"},
+            "instance_key":          {"type": "keyword"},
+            "instance_status":       {"type": "keyword"},
+            "id":                    {"type": "keyword"},
+            "externalId":            {"type": "keyword"},
+            "status":                {"type": "keyword"},
+            "type":                  {"type": "keyword"},
+            "message":               {"type": "object", "enabled": True},
+            "affectsAll":            {"type": "boolean"},
+            "isCore":                {"type": "boolean"},
+            "additionalInformation": {"type": "text"},
+            "serviceKeys":           {"type": "keyword"},
+            "instanceKeys":          {"type": "keyword"},
+            "createdAt":             {"type": "date"},
+            "updatedAt":             {"type": "date"},
+        }
+    }
+}
+
+MAINTENANCE_MAPPING = {
+    "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+    "mappings": {
+        "properties": {
+            "@timestamp":               {"type": "date"},
+            "domain_alias":             {"type": "keyword"},
+            "instance_key":             {"type": "keyword"},
+            "instance_status":          {"type": "keyword"},
+            "id":                       {"type": "keyword"},
+            "externalId":               {"type": "keyword"},
+            "status":                   {"type": "keyword"},
+            "type":                     {"type": "keyword"},
+            "name":                     {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
+            "message":                  {"type": "object", "enabled": True},
+            "externalMaintenanceType":  {"type": "keyword"},
+            "releaseType":              {"type": "keyword"},
+            "substrate":                {"type": "keyword"},
+            "affectsAll":               {"type": "boolean"},
+            "isCore":                   {"type": "boolean"},
+            "plannedStartTime":         {"type": "date"},
+            "plannedEndTime":           {"type": "date"},
+            "additionalInformation":    {"type": "text"},
+            "serviceKeys":              {"type": "keyword"},
+            "instanceKeys":             {"type": "keyword"},
+            "createdAt":                {"type": "date"},
+            "updatedAt":                {"type": "date"},
+        }
+    }
+}
+
+
+# ============================================================================
+# Salesforce Status API Client
+# ============================================================================
+class SalesforceStatusClient:
+    """Fetches instance status from the Salesforce Trust Status API."""
+
+    def __init__(self, base_url: str):
+        self.base_url = base_url.rstrip("/")
+        self.session = requests.Session()
+        self.session.headers.update({"Accept": "application/json"})
+
+    def get_alias_status(self, alias: str) -> dict:
+        """
+        GET /instanceAliases/{alias}/status
+        Returns instance status with Incidents[] and Maintenances[].
+        """
+        url = f"{self.base_url}/instanceAliases/{alias}/status"
+        log.info("Fetching: %s", url)
+        resp = self.session.get(url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+
+        # API returns an array even for a single alias
+        if isinstance(data, list):
+            if not data:
+                raise ValueError(f"No instance found for alias '{alias}'")
+            data = data[0]
+
+        log.info(
+            "Instance=%s | status=%s | incidents=%d | maintenances=%d",
+            data.get("key", "?"), data.get("status", "?"),
+            len(data.get("Incidents", [])), len(data.get("Maintenances", [])),
+        )
+        return data
+
+
+# ============================================================================
+# Elasticsearch Ingestor
+# ============================================================================
+class ElasticIngestor:
+    """Handles index creation and document indexing."""
+
+    def __init__(self):
+        kwargs = {
+            "hosts": [ES_HOST],
+            "basic_auth": (ES_USER, ES_PASSWORD),
+            "request_timeout": 30,
+        }
+        if not ES_VERIFY_SSL:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            kwargs["verify_certs"] = False
+            kwargs["ssl_show_warn"] = False
+
+        self.es = Elasticsearch(**kwargs)
+        info = self.es.info()
+        log.info("Connected to ES %s", info["version"]["number"])
+
+    def ensure_indices(self):
+        """Create indices with mappings if they don't already exist."""
+        for idx, mapping in [(INCIDENT_INDEX, INCIDENT_MAPPING),
+                             (MAINTENANCE_INDEX, MAINTENANCE_MAPPING)]:
+            if not self.es.indices.exists(index=idx):
+                self.es.indices.create(index=idx, body=mapping)
+                log.info("Created index: %s", idx)
+
+    def index_doc(self, index: str, doc_id: str, doc: dict):
+        """Index a document using the Salesforce id as the ES _id."""
+        self.es.index(index=index, id=doc_id, document=doc)
+
+
+# ============================================================================
+# Orchestration
+# ============================================================================
+def run_once(sf: SalesforceStatusClient, es: ElasticIngestor | None, dry_run: bool = False):
+    """Single poll cycle: fetch from API → index into ES."""
+
+    status = sf.get_alias_status(SF_DOMAIN_ALIAS)
+
+    instance_key    = status.get("key", "unknown")
+    instance_status = status.get("status", "UNKNOWN")
+    incidents       = status.get("Incidents", [])
+    maintenances    = status.get("Maintenances", [])
+    now             = datetime.now(timezone.utc).isoformat()
+
+    # -- Dry-run --
+    if dry_run:
+        print(f"\n{'='*60}")
+        print(f"  Instance:     {instance_key}")
+        print(f"  Status:       {instance_status}")
+        print(f"  Incidents:    {len(incidents)}")
+        print(f"  Maintenances: {len(maintenances)}")
+        print(f"{'='*60}")
+        if incidents:
+            print("\n--- Incidents ---")
+            print(json.dumps(incidents, indent=2, default=str))
+        if maintenances:
+            print("\n--- Maintenances ---")
+            print(json.dumps(maintenances, indent=2, default=str))
+        if not incidents and not maintenances:
+            print("\n  ✓ No active incidents or maintenances.")
+        return
+
+    # -- Index incidents --
+    for inc in incidents:
+        doc = {
+            "@timestamp":            now,
+            "domain_alias":          SF_DOMAIN_ALIAS,
+            "instance_key":          instance_key,
+            "instance_status":       instance_status,
+            "id":                    str(inc.get("id", "")),
+            "externalId":            inc.get("externalId"),
+            "status":                inc.get("status"),
+            "type":                  inc.get("type"),
+            "message":               inc.get("message"),
+            "affectsAll":            inc.get("affectsAll", False),
+            "isCore":                inc.get("isCore", False),
+            "additionalInformation": inc.get("additionalInformation"),
+            "serviceKeys":           inc.get("serviceKeys", []),
+            "instanceKeys":          inc.get("instanceKeys", []),
+            "createdAt":             inc.get("createdAt"),
+            "updatedAt":             inc.get("updatedAt"),
+        }
+        es.index_doc(INCIDENT_INDEX, doc["id"], doc)
+        log.info("Indexed incident id=%s", doc["id"])
+
+    # -- Index maintenances --
+    for maint in maintenances:
+        doc = {
+            "@timestamp":              now,
+            "domain_alias":            SF_DOMAIN_ALIAS,
+            "instance_key":            instance_key,
+            "instance_status":         instance_status,
+            "id":                      str(maint.get("id", "")),
+            "externalId":              maint.get("externalId"),
+            "status":                  maint.get("status"),
+            "type":                    maint.get("type"),
+            "name":                    maint.get("name"),
+            "message":                 maint.get("message"),
+            "externalMaintenanceType": maint.get("externalMaintenanceType"),
+            "releaseType":             maint.get("releaseType"),
+            "substrate":               maint.get("substrate"),
+            "affectsAll":              maint.get("affectsAll", False),
+            "isCore":                  maint.get("isCore", False),
+            "plannedStartTime":        maint.get("plannedStartTime"),
+            "plannedEndTime":          maint.get("plannedEndTime"),
+            "additionalInformation":   maint.get("additionalInformation"),
+            "serviceKeys":             maint.get("serviceKeys", []),
+            "instanceKeys":            maint.get("instanceKeys", []),
+            "createdAt":               maint.get("createdAt"),
+            "updatedAt":               maint.get("updatedAt"),
+        }
+        es.index_doc(MAINTENANCE_INDEX, doc["id"], doc)
+        log.info("Indexed maintenance id=%s (%s)", doc["id"], doc.get("name", ""))
+
+    log.info("Done. Indexed %d incident(s), %d maintenance(s).", len(incidents), len(maintenances))
+
+
+# ============================================================================
+# CLI
+# ============================================================================
+def main():
+    parser = argparse.ArgumentParser(
+        description="Ingest Salesforce Status incidents & maintenances into Elasticsearch"
+    )
+    parser.add_argument("--once",    action="store_true", help="Single run then exit")
+    parser.add_argument("--dry-run", action="store_true", help="Fetch & print only, no ES writes")
+    args = parser.parse_args()
+
+    sf = SalesforceStatusClient(SF_BASE_URL)
+    es = None
+
+    if not args.dry_run:
+        es = ElasticIngestor()
+        es.ensure_indices()
+
+    if args.once or args.dry_run:
+        run_once(sf, es, dry_run=args.dry_run)
+    else:
+        log.info("Polling every %ds. Ctrl+C to stop.", POLL_INTERVAL)
+        while True:
+            try:
+                run_once(sf, es)
+            except requests.exceptions.RequestException as e:
+                log.error("API error (will retry): %s", e)
+            except Exception as e:
+                log.error("Error (will retry): %s", e, exc_info=True)
+            time.sleep(POLL_INTERVAL)
+
+
+if __name__ == "__main__":
+    main()
