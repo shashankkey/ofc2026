@@ -1,3 +1,22 @@
+# Salesforce Status API
+SF_STATUS_BASE_URL=https://api.status.salesforce.com/v1
+SF_DOMAIN_ALIAS=effectv
+
+# Elasticsearch
+ES_HOST=http://173.203.133.187:9656
+ES_USER=elastic
+ES_PASSWORD=mygov@456
+ES_VERIFY_SSL=false
+
+# Index names
+ES_INCIDENT_INDEX=salesforce-incidents
+ES_MAINTENANCE_INDEX=salesforce-maintenances
+
+# Polling interval in seconds (default 5 minutes)
+POLL_INTERVAL=300
+
+
+
 """
 Salesforce Status → Elasticsearch Ingestion Script
 
