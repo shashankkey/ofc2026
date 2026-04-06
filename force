@@ -128,6 +128,62 @@ MAINTENANCE_MAPPING = {
 }
 
 
+# Mapping for MuleSoft per-instance incidents (nested under each Instances[])
+MULESOFT_INCIDENT_MAPPING = {
+    "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+    "mappings": {
+        "properties": {
+            "@timestamp":            {"type": "date"},
+            "product_key":           {"type": "keyword"},   # e.g. "Mulesoft"
+            "product_name":          {"type": "keyword"},   # e.g. "MuleSoft"
+            "instance_key":          {"type": "keyword"},   # e.g. "RUNTIMEPLANE-US"
+            "instance_status":       {"type": "keyword"},   # e.g. "OK"
+            "instance_location":     {"type": "keyword"},   # e.g. "NA", "EMEA", "APAC"
+            "instance_environment":  {"type": "keyword"},   # e.g. "production"
+            "instance_is_active":    {"type": "boolean"},
+            "id":                    {"type": "keyword"},
+            "externalId":            {"type": "keyword"},
+            "status":                {"type": "keyword"},
+            "type":                  {"type": "keyword"},
+            "message":               {"type": "object", "enabled": True},
+            "affectsAll":            {"type": "boolean"},
+            "isCore":                {"type": "boolean"},
+            "additionalInformation": {"type": "text"},
+            "serviceKeys":           {"type": "keyword"},
+            "instanceKeys":          {"type": "keyword"},
+            "createdAt":             {"type": "date"},
+            "updatedAt":             {"type": "date"},
+        }
+    }
+}
+ 
+# Mapping for MuleSoft instance health snapshots (one doc per instance per poll)
+MULESOFT_INSTANCE_MAPPING = {
+    "settings": {"number_of_shards": 1, "number_of_replicas": 0},
+    "mappings": {
+        "properties": {
+            "@timestamp":           {"type": "date"},
+            "product_key":          {"type": "keyword"},
+            "product_name":         {"type": "keyword"},
+            "instance_key":         {"type": "keyword"},
+            "status":               {"type": "keyword"},
+            "location":             {"type": "keyword"},
+            "environment":          {"type": "keyword"},
+            "releaseVersion":       {"type": "keyword"},
+            "releaseNumber":        {"type": "keyword"},
+            "isActive":             {"type": "boolean"},
+            "city":                 {"type": "keyword"},
+            "stateName":            {"type": "keyword"},
+            "countryName":          {"type": "keyword"},
+            "maintenanceWindow":    {"type": "keyword"},
+            "incident_count":       {"type": "integer"},
+            "createdAt":            {"type": "date"},
+            "updatedAt":            {"type": "date"},
+        }
+    }
+}
+
+
 # ============================================================================
 # Salesforce Status API Client
 # ============================================================================
