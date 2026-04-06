@@ -163,7 +163,30 @@ class SalesforceStatusClient:
         )
         return data
 
-
+    def get_product_status(self, product_id: str) -> dict:
+        """
+        GET /v1/products/{product_id}
+        Returns the full product object including all instances and their incidents.
+        """
+        url = f"{self.base_url}/products/{product_id}"
+        log.info("Fetching MuleSoft product status: %s", url)
+        resp = self.session.get(url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+ 
+        instances = data.get("Instances", [])
+        active_instances = [i for i in instances if i.get("isActive", True)]
+        total_incidents = sum(len(i.get("Incidents", [])) for i in active_instances)
+        degraded = [i["key"] for i in active_instances if i.get("status", "OK") != "OK"]
+ 
+        log.info(
+            "MuleSoft product=%s | active_instances=%d | total_incidents=%d | degraded=%s",
+            data.get("key", "?"),
+            len(active_instances),
+            total_incidents,
+            degraded if degraded else "none",
+        )
+        return data
 # ============================================================================
 # Elasticsearch Ingestor
 # ============================================================================
@@ -284,7 +307,113 @@ def run_once(sf: SalesforceStatusClient, es: ElasticIngestor | None, dry_run: bo
 
     log.info("Done. Indexed %d incident(s), %d maintenance(s).", len(incidents), len(maintenances))
 
-
+def run_mulesoft_once(
+    ms: MulesoftProductClient,
+    es: ElasticIngestor | None,
+    dry_run: bool = False,
+):
+    """
+    Single MuleSoft poll cycle.
+ 
+    For every active instance in the MuleSoft product response:
+      1. Write an instance-health snapshot → mulesoft-instances index
+         (_id = instance_key, so each poll overwrites the previous snapshot)
+      2. For each incident on that instance:
+         Write an incident doc → mulesoft-incidents index
+         (_id = incident id, idempotent upsert)
+ 
+    The product endpoint does not surface Maintenances at the instance level,
+    so only Incidents are captured here.
+    """
+    product   = ms.get_product_status(MULESOFT_PRODUCT_ID)
+    now       = datetime.now(timezone.utc).isoformat()
+ 
+    product_key  = product.get("key",  "Mulesoft")
+    product_name = product.get("name", "MuleSoft")
+    instances    = product.get("Instances", [])
+ 
+    # Filter to active instances only
+    active_instances = [i for i in instances if i.get("isActive", True)]
+ 
+    # -- Dry-run --
+    if dry_run:
+        total_incidents = sum(len(i.get("Incidents", [])) for i in active_instances)
+        degraded = [(i["key"], i.get("status")) for i in active_instances if i.get("status") != "OK"]
+ 
+        print(f"\n{'='*60}")
+        print(f"  Product:          {product_name} ({product_key})")
+        print(f"  Active instances: {len(active_instances)} / {len(instances)}")
+        print(f"  Total incidents:  {total_incidents}")
+        print(f"  Degraded:         {degraded if degraded else 'none'}")
+        print(f"{'='*60}")
+ 
+        for inst in active_instances:
+            incidents = inst.get("Incidents", [])
+            if incidents:
+                print(f"\n  [{inst['key']}] status={inst.get('status')} — {len(incidents)} incident(s):")
+                print(json.dumps(incidents, indent=4, default=str))
+ 
+        if total_incidents == 0:
+            print("\n  ✓ No active incidents across MuleSoft instances.")
+        return
+ 
+    # -- Index instance snapshots + per-instance incidents --
+    total_incidents_indexed = 0
+ 
+    for inst in active_instances:
+        inst_key      = inst.get("key", "unknown")
+        inst_status   = inst.get("status", "UNKNOWN")
+        inst_incidents = inst.get("Incidents", [])
+ 
+        # 1. Instance health snapshot (upserted by instance_key).
+        #    Spread the full raw instance object so any new API fields are
+        #    captured automatically, then overlay our computed/enrichment keys.
+        #    "Incidents" is stripped — incidents are stored in their own index.
+        instance_doc = {
+            **{k: v for k, v in inst.items() if k != "Incidents"},
+            "@timestamp":   now,
+            "product_key":  product_key,
+            "product_name": product_name,
+            "instance_key": inst_key,   # explicit alias for clarity
+            "incident_count": len(inst_incidents),
+        }
+        es.index_doc(MULESOFT_INSTANCE_INDEX, inst_key, instance_doc)
+        log.debug("Upserted instance snapshot key=%s status=%s", inst_key, inst_status)
+ 
+        # 2. Individual incident documents.
+        #    Spread the full raw incident object, then overlay enrichment context
+        #    (product + parent instance metadata) so Kibana queries need no joins.
+        for inc in inst_incidents:
+            inc_id = str(inc.get("id", ""))
+            if not inc_id:
+                log.warning("Skipping incident with no id on instance %s", inst_key)
+                continue
+ 
+            inc_doc = {
+                **inc,                          # all raw incident fields, future-proof
+                "@timestamp":           now,
+                "product_key":          product_key,
+                "product_name":         product_name,
+                # parent instance context — prefixed to avoid collisions with
+                # incident-level fields that share names (e.g. "status")
+                "instance_key":         inst_key,
+                "instance_status":      inst_status,
+                "instance_location":    inst.get("location"),
+                "instance_environment": inst.get("environment"),
+                "instance_is_active":   inst.get("isActive", True),
+            }
+            es.index_doc(MULESOFT_INDEX, inc_id, inc_doc)
+            log.info(
+                "Indexed MuleSoft incident id=%s instance=%s status=%s",
+                inc_id, inst_key, inc.get("status"),
+            )
+            total_incidents_indexed += 1
+ 
+    log.info(
+        "MuleSoft done. Snapshotted %d active instance(s), indexed %d incident(s).",
+        len(active_instances),
+        total_incidents_indexed,
+    )
 # ============================================================================
 # CLI
 # ============================================================================
