@@ -1,0 +1,99 @@
+# Glean Platform Usage Analytics — Slide Points
+
+---
+
+## Slide 1: Title
+
+- **Glean Platform Usage Analytics**
+- May 2026 | Last 7 Days
+
+---
+
+## Slide 2: What Is This Dashboard?
+
+- Built on Kibana to track Glean platform adoption across the org
+- Data ingested from Glean API into Elasticsearch via automated Python pipeline
+- Covers three key areas: Platform-wide usage, AI Assistant, and Agents
+- Enables data-driven decisions on adoption, engagement, and ROI
+
+---
+
+## Slide 3: Platform Overview
+
+- **1,300 monthly active users** across the organization
+- **950 weekly active users** with a **72% stickiness ratio** — users keep coming back
+- ~47% of employees (2,005 out of 4,229) have signed up
+- **14,600+ searches** performed with **71.6% satisfaction**
+- Search is the primary use case, but AI features are growing fast
+- Daily active user trends show steady engagement with a spike around May 10–11
+
+---
+
+## Slide 4: Assistant Analytics
+
+- **739 monthly active users** — 57% of all platform users engage with the AI assistant
+- **70.9% stickiness** — assistant users return just as often as search users
+- AI Answers and Summarization are the most-used features
+- Chat volume correlates closely with daily active users
+- Feedback collection is minimal — need more signal to measure quality
+
+---
+
+## Slide 5: Agents Analytics — Adoption
+
+- **165 monthly active users** using agents — early but growing fast
+- **27 agents deployed** across the platform
+- **43% stickiness** — lower than platform average, room to build habit
+- Agent runs spiked from ~5 to ~60 per day in just one week — momentum is real
+
+---
+
+## Slide 6: Agents Analytics — Who's Using Them?
+
+- **Sales Development leads** with 66 users, 356 runs, and 29.2% adoption rate
+- Usage is concentrated in sales-focused teams
+- 10 departments have some agent activity, but most are below 10 runs
+- Opportunity to expand agents into Ops, Campaign Management, and other teams
+
+---
+
+## Slide 7: Agents Analytics — Top Agents
+
+- **"The Competitive Companion"** is the #1 agent — 87 users, 145 runs, 8 upvotes, zero downvotes
+- Top 4 agents drive the majority of all runs
+- Most popular agents support competitive intelligence and sales enablement workflows
+- Long-tail agents exist but have limited adoption — need promotion or retirement
+
+---
+
+## Slide 8: Key Wins
+
+- 72% stickiness shows the platform is sticky and valuable
+- Over half the user base is actively using AI-powered features
+- Agents went from near-zero to 60 daily runs in one week
+- Sales Development is an organic champion — adopted agents without heavy push
+- Dashboard now gives full visibility into platform health
+
+---
+
+## Slide 9: Areas to Improve
+
+- 53% of employees still haven't signed up — big onboarding opportunity
+- Search satisfaction at 71.6% — good but not great, need to dig into low-quality queries
+- Feedback volume is too low to measure assistant or agent quality reliably
+- Agent stickiness at 43% suggests users try once but don't always come back
+- Agent usage is heavily concentrated in Sales — need broader department coverage
+
+---
+
+## Slide 10: Next Steps
+
+- Run targeted onboarding campaigns to close the 53% signup gap
+- Embed in-flow feedback prompts in assistant and agent responses
+- Partner with Sales Development as agent champions to drive org-wide adoption
+- Study what makes "The Competitive Companion" successful and replicate the pattern
+- Build department-specific agents for Ops and Campaign Management
+- Evaluate and retire underperforming long-tail agents
+- Establish a monthly reporting cadence from this dashboard
+
+---
