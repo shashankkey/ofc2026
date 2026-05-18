@@ -1,0 +1,18 @@
+    for pu in r.get("perUserInsights") or []:
+        person = pu.get("person", {})
+        identifier = person.get("obfuscatedId") or person.get("name") or str(id(pu))
+        pu_id = _make_id("per_user", today, identifier)
+        
+        doc_body = {
+            **base,
+            "doc_type": "per_user",
+            "@timestamp": ingested_at,
+            "person_name": person.get("name"),
+            "person_obfuscated_id": person.get("obfuscatedId"),
+            **{k: v for k, v in pu.items() if k != "person"}
+        }
+
+        docs.append({
+            "_id": pu_id,
+            "_doc": doc_body
+        })
