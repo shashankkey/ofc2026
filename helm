@@ -1,0 +1,242 @@
+# .github/workflows/validate-pr.yml
+name: Validate OTel Configs (PR)
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'configs/**.yml'
+
+env:
+  HELM_VERSION: 'v3.14.0'
+  HELM_REPO_NAME: 'opentelemetry-helm'
+  HELM_REPO_URL: 'https://open-telemetry.github.io/opentelemetry-helm-charts'
+  DEFAULT_CHART_VERSION: '0.138.0'
+  DEFAULT_NAMESPACE: 'inframonitoring'
+
+jobs:
+  validate:
+    name: Validate Changed Configs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Add OTel Helm repo
+        run: |
+          helm repo add ${{ env.HELM_REPO_NAME }} ${{ env.HELM_REPO_URL }}
+          helm repo update
+
+      - name: Get changed config files
+        id: changed
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- 'configs/*.yml' | tr '\n' ' ')
+          echo "files=${CHANGED}" >> $GITHUB_OUTPUT
+          echo "Changed files: ${CHANGED}"
+
+      - name: Lint and template validate
+        id: validate
+        run: |
+          FAILED=0
+          RESULTS=""
+
+          for file in ${{ steps.changed.outputs.files }}; do
+            COLLECTOR=$(basename "$file" .yml)
+            echo "--- Validating: $COLLECTOR ---"
+
+            # Helm lint
+            if helm lint ${{ env.HELM_REPO_NAME }}/opentelemetry-collector \
+              --version ${{ env.DEFAULT_CHART_VERSION }} \
+              -f "$file" > /tmp/lint-output.txt 2>&1; then
+              echo "✅ Lint passed: $COLLECTOR"
+              RESULTS="${RESULTS}\n✅ **${COLLECTOR}** — lint passed"
+            else
+              echo "❌ Lint failed: $COLLECTOR"
+              cat /tmp/lint-output.txt
+              RESULTS="${RESULTS}\n❌ **${COLLECTOR}** — lint failed\n\`\`\`\n$(cat /tmp/lint-output.txt)\n\`\`\`"
+              FAILED=1
+            fi
+
+            # Helm template dry-run
+            if helm template "$COLLECTOR" \
+              ${{ env.HELM_REPO_NAME }}/opentelemetry-collector \
+              --version ${{ env.DEFAULT_CHART_VERSION }} \
+              -f "$file" \
+              --namespace ${{ env.DEFAULT_NAMESPACE }} > /dev/null 2>&1; then
+              echo "✅ Template render passed: $COLLECTOR"
+              RESULTS="${RESULTS}, template render passed"
+            else
+              echo "❌ Template render failed: $COLLECTOR"
+              RESULTS="${RESULTS}, template render failed ❌"
+              FAILED=1
+            fi
+          done
+
+          echo "results=${RESULTS}" >> $GITHUB_OUTPUT
+          exit $FAILED
+
+      - name: Post PR comment
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const results = `${{ steps.validate.outputs.results }}`;
+            const status = '${{ steps.validate.outcome }}' === 'success' ? '✅ Validation Passed' : '❌ Validation Failed';
+            const body = `## OTel Collector Config Validation\n\n**${status}**\n\n${results}\n\n> Merge to \`main\` will trigger Helm upgrade for changed collectors.`;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+
+# .github/workflows/upgrade-on-merge.yml
+name: Upgrade OTel Collectors on Merge
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'configs/**.yml'
+  workflow_dispatch:
+    inputs:
+      helm_chart_version:
+        description: 'Helm chart version'
+        required: false
+        default: '0.138.0'
+        type: string
+      namespace:
+        description: 'Kubernetes namespace'
+        required: false
+        default: 'inframonitoring'
+        type: string
+
+env:
+  HELM_VERSION: 'v3.14.0'
+  HELM_REPO_NAME: 'opentelemetry-helm'
+  HELM_REPO_URL: 'https://open-telemetry.github.io/opentelemetry-helm-charts'
+  DEFAULT_CHART_VERSION: '0.138.0'
+  DEFAULT_NAMESPACE: 'inframonitoring'
+
+jobs:
+  detect-changes:
+    name: Detect Changed Configs
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.detect.outputs.matrix }}
+      has_changes: ${{ steps.detect.outputs.has_changes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed collectors
+        id: detect
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            # Manual trigger: pick up ALL configs
+            FILES=$(ls configs/*.yml 2>/dev/null)
+          else
+            # Push trigger: only changed files
+            FILES=$(git diff --name-only HEAD~1 HEAD -- 'configs/*.yml')
+          fi
+
+          if [ -z "$FILES" ]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Build JSON matrix from filenames
+          MATRIX=$(echo "$FILES" | while read file; do
+            COLLECTOR=$(basename "$file" .yml)
+            echo "{\"collector\":\"${COLLECTOR}\",\"config\":\"${file}\"}"
+          done | jq -sc '.')
+
+          echo "matrix=${MATRIX}" >> $GITHUB_OUTPUT
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "Collectors to upgrade: $MATRIX"
+
+  upgrade:
+    name: Upgrade → ${{ matrix.collector }}
+    runs-on: ubuntu-latest
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+      fail-fast: false   # continue upgrading others if one fails
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Write kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBECONFIG_ASHPROD }}" | base64 -d > ~/.kube/config
+          chmod 600 ~/.kube/config
+
+      - name: Add OTel Helm repo
+        run: |
+          helm repo add ${{ env.HELM_REPO_NAME }} ${{ env.HELM_REPO_URL }}
+          helm repo update
+
+      - name: Helm upgrade → ${{ matrix.collector }}
+        run: |
+          CHART_VERSION="${{ github.event.inputs.helm_chart_version || env.DEFAULT_CHART_VERSION }}"
+          NAMESPACE="${{ github.event.inputs.namespace || env.DEFAULT_NAMESPACE }}"
+
+          echo "🚀 Upgrading: ${{ matrix.collector }}"
+          echo "   Chart version : $CHART_VERSION"
+          echo "   Namespace     : $NAMESPACE"
+          echo "   Config file   : ${{ matrix.config }}"
+
+          helm upgrade ${{ matrix.collector }} \
+            ${{ env.HELM_REPO_NAME }}/opentelemetry-collector \
+            --version "$CHART_VERSION" \
+            -f "${{ matrix.config }}" \
+            -n "$NAMESPACE" \
+            --kubeconfig ~/.kube/config \
+            --install \
+            --atomic \
+            --timeout 5m \
+            --cleanup-on-fail
+
+          echo "✅ Upgrade successful: ${{ matrix.collector }}"
+
+      - name: Verify rollout
+        run: |
+          NAMESPACE="${{ github.event.inputs.namespace || env.DEFAULT_NAMESPACE }}"
+
+          # Try daemonset first (common for node-level collectors), fallback to deployment
+          kubectl rollout status daemonset/${{ matrix.collector }}-opentelemetry-collector \
+            -n "$NAMESPACE" --timeout=3m \
+          || kubectl rollout status deployment/${{ matrix.collector }}-opentelemetry-collector \
+            -n "$NAMESPACE" --timeout=3m
+
+          echo "✅ Rollout verified: ${{ matrix.collector }}"
+
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          NAMESPACE="${{ github.event.inputs.namespace || env.DEFAULT_NAMESPACE }}"
+          echo "❌ Upgrade failed — rolling back ${{ matrix.collector }}"
+          helm rollback ${{ matrix.collector }} 0 \
+            -n "$NAMESPACE" \
+            --kubeconfig ~/.kube/config || true
